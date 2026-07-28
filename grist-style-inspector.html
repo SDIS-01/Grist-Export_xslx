@@ -259,11 +259,19 @@
    Les paramètres d'URL restent acceptés, en priorité, comme secours :
      ?table=NomTable  force la table lue
      ?vue=texte       cible une vue par son nom de page ou son titre
-     ?compact=1       n'affiche que le bouton d'export */
+     ?compact=1       n'affiche que le bouton d'export
+     ?dateformat=...  format des dates (défaut : dd/mm/yyyy)
+     ?heures=1        ajoute l'heure aux colonnes Date/heure */
 const PARAMS         = new URLSearchParams(location.search);
 const OVERRIDE_TABLE = PARAMS.get('table') || null;
 const VIEW_HINT      = (PARAMS.get('vue') || PARAMS.get('view') || '').trim().toLowerCase();
 const URL_COMPACT    = PARAMS.get('compact') === '1' || PARAMS.has('bouton');
+
+/* Format appliqué à toutes les colonnes de type Date et Date/heure.
+   L'heure est écartée par défaut : une colonne Date de Grist est
+   stockée à minuit, et Excel afficherait un « 00:00:00 » parasite. */
+const DATE_FORMAT = PARAMS.get('dateformat') || 'dd/mm/yyyy';
+const WITH_TIME   = PARAMS.get('heures') === '1';
 
 let TABLE_ID = OVERRIDE_TABLE;   // résolu au démarrage si non forcé
 
@@ -769,12 +777,13 @@ function argb(hex) {
   return (h.length === 8 ? h : 'FF' + h).toUpperCase();
 }
 
-/* Tokens moment (Grist) -> tokens de format Excel. */
-function dateNumFmt(fmt, timeFmt) {
-  if (!fmt) return 'dd/mm/yyyy';
-  let out = fmt.replace(/Y/g, 'y').replace(/D/g, 'd').replace(/M/g, 'm');
-  if (timeFmt) out += ' ' + timeFmt.replace(/H/g, 'h').replace(/A/g, 'AM/PM');
-  return out;
+/* Format de date appliqué à l'export. Grist propose ses propres formats
+   (moment.js), mais ils ne se transposent pas toujours proprement en
+   Excel — et l'heure d'une colonne Date n'a pas de sens. On impose donc
+   un format unique, modifiable par l'URL. */
+function dateNumFmt(timeFmt) {
+  if (!WITH_TIME || !timeFmt) return DATE_FORMAT;
+  return DATE_FORMAT + ' ' + timeFmt.replace(/H/g, 'h').replace(/A/g, 'AM/PM');
 }
 
 function numberNumFmt(o) {
@@ -814,6 +823,29 @@ function applyStyle(cell, o, isBase) {
   if (Object.keys(al).length) cell.alignment = { ...(cell.alignment || {}), ...al };
 }
 
+/* Une colonne Date de Grist est stockée à minuit UTC : la conversion est
+   directe. Une colonne Date/heure porte un fuseau dans son type
+   (DateTime:Europe/Paris) ; sans correction, un horodatage de 00h30 à
+   Paris ressortirait daté de la veille dans Excel. */
+function toExcelDate(raw, type) {
+  if (typeof raw !== 'number') return raw;
+  const ms = raw * 1000;
+  const tz = String(type).split(':')[1];
+  if (!tz) return new Date(ms);
+  try {
+    const parts = {};
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(new Date(ms)).forEach(p => { parts[p.type] = p.value; });
+    return new Date(Date.UTC(+parts.year, +parts.month - 1, +parts.day,
+                             +parts.hour % 24, +parts.minute, +parts.second));
+  } catch (e) {
+    return new Date(ms);
+  }
+}
+
 /* Valeur Grist -> valeur Excel, en respectant le type de colonne. */
 function cellValue(f, rowIdx) {
   const raw = displayedValue(f, rowIdx);
@@ -828,7 +860,7 @@ function cellValue(f, rowIdx) {
   switch (f.baseType) {
     case 'Date':
     case 'DateTime':
-      return typeof raw === 'number' ? new Date(raw * 1000) : raw;   // secondes epoch
+      return toExcelDate(raw, f.type);
     case 'Bool':
       return !!raw;
     case 'ChoiceList':
@@ -922,7 +954,7 @@ async function exportXlsx() {
         /* d) format de nombre / de date */
         if (!f.displayColId) {
           if (f.baseType === 'Date' || f.baseType === 'DateTime') {
-            cell.numFmt = dateNumFmt(f.opts.dateFormat, f.opts.timeFormat);
+            cell.numFmt = dateNumFmt(f.opts.timeFormat);
           } else if (f.baseType === 'Numeric' || f.baseType === 'Int') {
             cell.numFmt = numberNumFmt(f.opts);
           }
