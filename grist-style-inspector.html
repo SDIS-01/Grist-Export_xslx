@@ -555,6 +555,23 @@ function previewCss(o) {
   return css.join(';');
 }
 
+/* Style effectif d'une cellule : le style de base, puis la couleur du
+   choix, puis chaque règle vraie dans l'ordre — la dernière l'emporte,
+   exactement comme dans l'affichage Grist. */
+function effectiveStyle(f, rowIdx) {
+  let st = { ...f.opts };
+  const co = f.opts.choiceOptions;
+  if (co && f.baseType === 'Choice') {
+    const v = S.data[f.colId] ? S.data[f.colId][rowIdx] : null;
+    if (typeof v === 'string' && co[v]) st = { ...st, ...co[v] };
+  }
+  for (const rule of f.rules) {
+    const flags = rule.hasData ? S.data[rule.colId] : null;
+    if (flags && flags[rowIdx]) st = { ...st, ...rule.style };
+  }
+  return st;
+}
+
 function render() {
   const section = currentSection();
   const fields = currentFields();
@@ -580,8 +597,9 @@ function render() {
   /* --- colonnes --- */
   $('cols').innerHTML = fields.map(f => {
     const sample = first !== null ? asText(displayedValue(f, first)) : '—';
+    const css = first !== null ? previewCss(effectiveStyle(f, first)) : previewCss(f.opts);
     return '<div class="col">' +
-      '<div class="preview" style="' + previewCss(f.opts) + '">' + escapeHtml(sample || '—') + '</div>' +
+      '<div class="preview" style="' + css + '">' + escapeHtml(sample || '—') + '</div>' +
       '<div>' +
         '<div class="cid">' + escapeHtml(f.colId) + '</div>' +
         '<div class="label">' + escapeHtml(f.label) + '</div>' +
@@ -668,9 +686,13 @@ function numberNumFmt(o) {
   }
 }
 
-function applyStyle(cell, o) {
+/* isBase : sur le style de base d'une colonne, un fond blanc est le
+   défaut de Grist et ne mérite pas d'être peint. Sur une règle, en
+   revanche, un fond blanc est un choix délibéré qu'il faut appliquer
+   pour annuler la couleur précédente. */
+function applyStyle(cell, o, isBase) {
   const fill = argb(o.fillColor);
-  if (fill && fill !== 'FFFFFFFF') {
+  if (fill && !(isBase && fill === 'FFFFFFFF')) {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
   }
   const font = {};
@@ -770,7 +792,7 @@ async function exportXlsx() {
         const cell = row.getCell(i + 1);
 
         /* a) style de base de la colonne */
-        applyStyle(cell, f.opts);
+        applyStyle(cell, f.opts, true);
 
         /* b) couleurs des valeurs Choice / ChoiceList */
         const co = f.opts.choiceOptions;
@@ -783,11 +805,13 @@ async function exportXlsx() {
           }
         }
 
-        /* c) règle conditionnelle : la première règle vraie l'emporte,
-              comme dans l'affichage Grist. */
+        /* c) règles conditionnelles. Grist les évalue toutes et donne la
+              priorité à la DERNIÈRE règle vraie. On les applique donc
+              dans l'ordre, sans interrompre : chacune écrase la
+              précédente sur les propriétés qu'elle définit. */
         for (const rule of f.rules) {
-          const flags = rule.colId ? S.data[rule.colId] : null;
-          if (flags && flags[r]) { applyStyle(cell, rule.style); break; }
+          const flags = rule.hasData ? S.data[rule.colId] : null;
+          if (flags && flags[r]) applyStyle(cell, rule.style);
         }
 
         /* d) format de nombre / de date */
