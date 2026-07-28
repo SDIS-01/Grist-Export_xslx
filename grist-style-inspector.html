@@ -1,5 +1,5 @@
 <!--
-  Inspecteur de mise en forme Grist + export .xlsx fidèle
+  Export Excel fidèle depuis Grist
   -------------------------------------------------------
   Widget custom en LECTURE SEULE. Il lit les tables système de Grist,
   résout la mise en forme réelle de chaque colonne, et rejoue le tout
@@ -22,7 +22,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Inspecteur de mise en forme — MEC_2023</title>
+<title>Export Excel fidèle — Grist</title>
 
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
@@ -172,6 +172,7 @@
   body.compact .bar { justify-content: center; padding: 12px 14px; border-bottom: none; }
   body.compact #ident,
   body.compact #pickerWrap,
+  body.compact #compactWrap,
   body.compact #fidelityWrap { display: none; }
   body.compact #exportBtn { margin-left: 0; }
   body.compact section { display: none; }
@@ -183,6 +184,7 @@
   body.compact.details-open .bar { justify-content: flex-start; border-bottom: 1px solid var(--hair); }
   body.compact.details-open #ident,
   body.compact.details-open #pickerWrap,
+  body.compact.details-open #compactWrap,
   body.compact.details-open #fidelityWrap { display: flex; }
   body.compact.details-open #exportBtn { margin-left: auto; }
   body.compact.details-open section { display: block; }
@@ -197,7 +199,7 @@
 <div class="bar">
   <div id="ident">
     <span class="eyebrow">Table</span>
-    <h1 id="tableName">MEC_2023</h1>
+    <h1 id="tableName">…</h1>
   </div>
   <label class="field" id="pickerWrap">
     <span>Vue lue</span>
@@ -206,6 +208,10 @@
   <label class="check" id="fidelityWrap">
     <input type="checkbox" id="fidelity" checked>
     Reprendre le tri et les filtres de la vue
+  </label>
+  <label class="check" id="compactWrap">
+    <input type="checkbox" id="compactToggle">
+    N'afficher que le bouton
   </label>
   <button id="exportBtn" disabled>Exporter en .xlsx</button>
   <button id="moreBtn" type="button">Détails</button>
@@ -236,16 +242,39 @@
 /* Paramètres passés dans l'URL du widget. Un seul fichier hébergé sert
    ainsi les deux usages :
      ...html                          -> inspecteur complet
-     ...html?compact=1&vue=Extract_MEC_2023  -> bouton d'export seul
+     ...html?compact=1                 -> bouton d'export seul
 
-   table   : identifiant de la table à lire (défaut : MEC_2023)
+   table   : force la table lue, si la détection automatique échoue
    vue     : sélectionne la vue dont le titre OU le nom de page contient
              ce texte ; évite d'avoir à choisir dans le sélecteur
    compact : masque l'inspecteur, ne laisse que le bouton d'export */
-const PARAMS    = new URLSearchParams(location.search);
-const TABLE_ID  = PARAMS.get('table') || 'MEC_2023';
-const VIEW_HINT = (PARAMS.get('vue') || PARAMS.get('view') || '').trim().toLowerCase();
-const COMPACT   = PARAMS.get('compact') === '1' || PARAMS.has('bouton');
+/* Le widget n'est plus lié à une table précise : il lit celle que Grist
+   lui donne comme source de données (panneau de droite, « Données
+   source »). Il fonctionne donc tel quel sur n'importe quelle table.
+
+   Ses réglages — vue exportée, mode compact, respect du tri et des
+   filtres — sont enregistrés par Grist pour CHAQUE widget posé. Deux
+   widgets sur deux pages différentes gardent chacun les siens.
+
+   Les paramètres d'URL restent acceptés, en priorité, comme secours :
+     ?table=NomTable  force la table lue
+     ?vue=texte       cible une vue par son nom de page ou son titre
+     ?compact=1       n'affiche que le bouton d'export */
+const PARAMS         = new URLSearchParams(location.search);
+const OVERRIDE_TABLE = PARAMS.get('table') || null;
+const VIEW_HINT      = (PARAMS.get('vue') || PARAMS.get('view') || '').trim().toLowerCase();
+const URL_COMPACT    = PARAMS.get('compact') === '1' || PARAMS.has('bouton');
+
+let TABLE_ID = OVERRIDE_TABLE;   // résolu au démarrage si non forcé
+
+/* Réglages persistés par Grist, par instance de widget. */
+let OPTS = { sectionRef: null, compact: URL_COMPACT, fidelity: true };
+
+function saveOptions() {
+  if (grist.widgetApi && grist.widgetApi.setOptions) {
+    grist.widgetApi.setOptions(OPTS).catch(() => {});
+  }
+}
 
 const S = {
   tableRef: null,
@@ -350,7 +379,6 @@ async function load() {
   S.rowCount = S.data.id.length;
 
   const picker = $('sectionPicker');
-  const previous = picker.value;          // on ne perd pas le choix à chaque rechargement
   picker.innerHTML = '';
   S.sections.forEach((s, i) => {
     const o = document.createElement('option');
@@ -359,23 +387,29 @@ async function load() {
     picker.appendChild(o);
   });
 
-  /* Ciblage par le paramètre "vue" : on cherche dans le nom de page puis
-     dans le titre de la vue. Sans correspondance, on garde la première. */
-  let target = 0;
-  if (VIEW_HINT) {
-    const hit = S.sections.findIndex(s =>
+  /* Priorité : réglage enregistré sur ce widget, puis paramètre d'URL,
+     puis première vue. On stocke l'identifiant de la vue, pas sa
+     position : il reste valable si l'ordre des vues change. */
+  let target = -1;
+  if (OPTS.sectionRef) {
+    target = S.sections.findIndex(s => s.id === OPTS.sectionRef);
+  }
+  if (target < 0 && VIEW_HINT) {
+    target = S.sections.findIndex(s =>
       (s.pageName + ' ' + (s.title || '')).toLowerCase().includes(VIEW_HINT));
-    if (hit >= 0) target = hit;
-    else if (!COMPACT) {
+    if (target < 0 && !OPTS.compact) {
       setStatus('Aucune vue ne correspond à « ' + VIEW_HINT + ' ». Première vue utilisée.', true);
     }
-  } else if (previous && S.sections[+previous]) {
-    target = +previous;
   }
-  picker.value = target;
+  picker.value = target < 0 ? 0 : target;
 
-  picker.onchange = render;
-  $('fidelity').onchange = render;
+  picker.onchange = () => { OPTS.sectionRef = currentSection().id; saveOptions(); render(); };
+  $('fidelity').onchange = () => { OPTS.fidelity = $('fidelity').checked; saveOptions(); render(); };
+  $('compactToggle').onchange = () => {
+    OPTS.compact = $('compactToggle').checked;
+    saveOptions();
+    applyOptions();
+  };
 
   $('exportBtn').disabled = false;
   render();
@@ -717,7 +751,7 @@ function render() {
       'c\'est que les références de règles ne remontent ni sur le champ ni sur la colonne.</p>';
   $('rulesSection').hidden = false;
 
-  setStatus(COMPACT && !document.body.classList.contains('details-open')
+  setStatus(OPTS.compact && !document.body.classList.contains('details-open')
     ? '<strong>' + rows.length + '</strong> ligne(s) prêtes à exporter'
     : '<strong>' + rows.length + '</strong> ligne(s) et <strong>' + fields.length +
       '</strong> colonne(s) seront exportées, dans l\'ordre affiché par la vue.');
@@ -921,25 +955,70 @@ async function exportXlsx() {
    7. DÉMARRAGE
    ========================================================================= */
 
-$('tableName').textContent = TABLE_ID;
 $('exportBtn').onclick = exportXlsx;
 
-/* En mode compact, l'inspecteur reste accessible via "Détails" : utile
-   pour vérifier tri, filtres et règles sans modifier l'URL du widget. */
-if (COMPACT) document.body.classList.add('compact');
+/* Le bouton "Détails" rouvre l'inspecteur ponctuellement, sans modifier
+   le réglage enregistré : utile pour vérifier tri, filtres et règles. */
 $('moreBtn').onclick = () => {
   const open = document.body.classList.toggle('details-open');
   $('moreBtn').textContent = open ? 'Masquer' : 'Détails';
   if (S.data) render();
 };
 
+/* Répercute les réglages enregistrés sur l'interface. */
+function applyOptions() {
+  document.body.classList.toggle('compact', !!OPTS.compact);
+  $('compactToggle').checked = !!OPTS.compact;
+  $('fidelity').checked = OPTS.fidelity !== false;
+  if (S.data) render();
+}
+
+/* La table lue est celle que Grist attribue au widget comme source de
+   données. Aucun nom de table n'est écrit en dur : le même fichier
+   hébergé fonctionne sur n'importe quelle table du document. */
+async function detectTableId() {
+  if (OVERRIDE_TABLE) return OVERRIDE_TABLE;
+  try {
+    if (grist.getTable) return await grist.getTable().getTableId();
+  } catch (e) { /* on tente l'autre voie */ }
+  try {
+    if (grist.selectedTable) return await grist.selectedTable.getTableId();
+  } catch (e) { /* idem */ }
+  throw new Error('Table source non identifiée. Dans le panneau de droite, ' +
+    'choisissez une table sous \u00ab\u00a0Données source\u00a0\u00bb, ' +
+    'ou ajoutez ?table=NomDeLaTable à l\'URL du widget.');
+}
+
+let booting = false;
+async function boot() {
+  if (booting) return;
+  booting = true;
+  try {
+    if (!TABLE_ID) TABLE_ID = await detectTableId();
+    $('tableName').textContent = TABLE_ID;
+    await load();
+    applyOptions();
+  } catch (e) {
+    setStatus(e.message, true);
+  } finally {
+    booting = false;
+  }
+}
+
 grist.ready({ requiredAccess: 'full' });
+
+/* Réglages propres à CE widget, mémorisés par Grist dans le document. */
+if (grist.onOptions) {
+  grist.onOptions(saved => {
+    OPTS = { ...OPTS, ...(saved || {}) };
+    applyOptions();
+  });
+}
 
 /* Rechargement à chaque changement de données, pour que l'aperçu et les
    compteurs restent alignés sur ce qu'affiche Grist. */
-grist.onRecords(() => { load().catch(e => setStatus(e.message, true)); });
-
-load().catch(e => setStatus(e.message, true));
+grist.onRecords(boot);
+boot();
 </script>
 </body>
 </html>
