@@ -161,6 +161,33 @@
   .ko { color: var(--alert); font-weight: 500; }
   .ok { color: #1d6a3c; }
 
+  /* ---- mode compact : seul le bouton d'export est visible ---- */
+  #moreBtn {
+    margin-left: 8px; background: transparent; color: var(--muted);
+    border-color: var(--hair); font-size: 11px; padding: 6px 10px;
+  }
+  #moreBtn:hover { background: var(--slab); color: var(--ink); }
+  body:not(.compact) #moreBtn { display: none; }
+
+  body.compact .bar { justify-content: center; padding: 12px 14px; border-bottom: none; }
+  body.compact #ident,
+  body.compact #pickerWrap,
+  body.compact #fidelityWrap { display: none; }
+  body.compact #exportBtn { margin-left: 0; }
+  body.compact section { display: none; }
+  body.compact .status {
+    text-align: center; border-bottom: none; padding: 4px 14px 10px; font-size: 11px;
+  }
+
+  /* Le bouton "Détails" rouvre l'inspecteur sans changer l'URL. */
+  body.compact.details-open .bar { justify-content: flex-start; border-bottom: 1px solid var(--hair); }
+  body.compact.details-open #ident,
+  body.compact.details-open #pickerWrap,
+  body.compact.details-open #fidelityWrap { display: flex; }
+  body.compact.details-open #exportBtn { margin-left: auto; }
+  body.compact.details-open section { display: block; }
+  body.compact.details-open .status { text-align: left; border-bottom: 1px solid var(--hair); }
+
   @media (max-width: 620px) { .col, .rule { grid-template-columns: 1fr; } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
@@ -168,19 +195,20 @@
 <body>
 
 <div class="bar">
-  <div>
+  <div id="ident">
     <span class="eyebrow">Table</span>
     <h1 id="tableName">MEC_2023</h1>
   </div>
-  <label class="field">
+  <label class="field" id="pickerWrap">
     <span>Vue lue</span>
     <select id="sectionPicker"></select>
   </label>
-  <label class="check">
+  <label class="check" id="fidelityWrap">
     <input type="checkbox" id="fidelity" checked>
     Reprendre le tri et les filtres de la vue
   </label>
   <button id="exportBtn" disabled>Exporter en .xlsx</button>
+  <button id="moreBtn" type="button">Détails</button>
 </div>
 
 <div class="status" id="status">Connexion au document…</div>
@@ -205,7 +233,19 @@
    1. CONFIGURATION ET ÉTAT
    ========================================================================= */
 
-const TABLE_ID = 'MEC_2023';   // <- table à inspecter
+/* Paramètres passés dans l'URL du widget. Un seul fichier hébergé sert
+   ainsi les deux usages :
+     ...html                          -> inspecteur complet
+     ...html?compact=1&vue=Extract_MEC_2023  -> bouton d'export seul
+
+   table   : identifiant de la table à lire (défaut : MEC_2023)
+   vue     : sélectionne la vue dont le titre OU le nom de page contient
+             ce texte ; évite d'avoir à choisir dans le sélecteur
+   compact : masque l'inspecteur, ne laisse que le bouton d'export */
+const PARAMS    = new URLSearchParams(location.search);
+const TABLE_ID  = PARAMS.get('table') || 'MEC_2023';
+const VIEW_HINT = (PARAMS.get('vue') || PARAMS.get('view') || '').trim().toLowerCase();
+const COMPACT   = PARAMS.get('compact') === '1' || PARAMS.has('bouton');
 
 const S = {
   tableRef: null,
@@ -257,9 +297,10 @@ function blankish(v) { return v === null || v === undefined || v === '' || v ===
    ========================================================================= */
 
 async function load() {
-  const [tables, cols, sections, fields] = await Promise.all([
+  const [tables, cols, views, sections, fields] = await Promise.all([
     grist.docApi.fetchTable('_grist_Tables'),
     grist.docApi.fetchTable('_grist_Tables_column'),
+    grist.docApi.fetchTable('_grist_Views'),
     grist.docApi.fetchTable('_grist_Views_section'),
     grist.docApi.fetchTable('_grist_Views_section_field'),
   ]);
@@ -283,9 +324,20 @@ async function load() {
   }
 
   const allFields = toRows(fields);
+  const pageNames = {};
+  toRows(views).forEach(v => { pageNames[v.id] = v.name || ''; });
+
+  /* On écarte les widgets custom et les graphiques : ils portent bien la
+     table en source, mais n'ont pas de mise en forme tabulaire à
+     exporter — et le widget d'export lui-même en fait partie. */
   S.sections = toRows(sections)
     .filter(s => s.tableRef === S.tableRef)
-    .map(s => ({ ...s, allFields: allFields.filter(f => f.parentId === s.id) }))
+    .filter(s => ['record', 'detail', 'single'].includes(s.parentKey || 'record'))
+    .map(s => ({
+      ...s,
+      pageName: pageNames[s.parentId] || '',
+      allFields: allFields.filter(f => f.parentId === s.id),
+    }))
     .filter(s => s.allFields.length);
 
   if (!S.sections.length) throw new Error('Aucune vue ne présente ' + TABLE_ID + '.');
@@ -298,13 +350,30 @@ async function load() {
   S.rowCount = S.data.id.length;
 
   const picker = $('sectionPicker');
+  const previous = picker.value;          // on ne perd pas le choix à chaque rechargement
   picker.innerHTML = '';
   S.sections.forEach((s, i) => {
     const o = document.createElement('option');
     o.value = i;
-    o.textContent = (s.title || 'Sans titre') + ' — ' + (s.parentKey || 'record') + ' #' + s.id;
+    o.textContent = (s.pageName ? s.pageName + ' › ' : '') + (s.title || 'Sans titre');
     picker.appendChild(o);
   });
+
+  /* Ciblage par le paramètre "vue" : on cherche dans le nom de page puis
+     dans le titre de la vue. Sans correspondance, on garde la première. */
+  let target = 0;
+  if (VIEW_HINT) {
+    const hit = S.sections.findIndex(s =>
+      (s.pageName + ' ' + (s.title || '')).toLowerCase().includes(VIEW_HINT));
+    if (hit >= 0) target = hit;
+    else if (!COMPACT) {
+      setStatus('Aucune vue ne correspond à « ' + VIEW_HINT + ' ». Première vue utilisée.', true);
+    }
+  } else if (previous && S.sections[+previous]) {
+    target = +previous;
+  }
+  picker.value = target;
+
   picker.onchange = render;
   $('fidelity').onchange = render;
 
@@ -648,8 +717,10 @@ function render() {
       'c\'est que les références de règles ne remontent ni sur le champ ni sur la colonne.</p>';
   $('rulesSection').hidden = false;
 
-  setStatus('<strong>' + rows.length + '</strong> ligne(s) et <strong>' + fields.length +
-            '</strong> colonne(s) seront exportées, dans l\'ordre affiché par la vue.');
+  setStatus(COMPACT && !document.body.classList.contains('details-open')
+    ? '<strong>' + rows.length + '</strong> ligne(s) prêtes à exporter'
+    : '<strong>' + rows.length + '</strong> ligne(s) et <strong>' + fields.length +
+      '</strong> colonne(s) seront exportées, dans l\'ordre affiché par la vue.');
 }
 
 
@@ -831,7 +902,8 @@ async function exportXlsx() {
     }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = TABLE_ID + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
+    a.download = (section.title || TABLE_ID).replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '')
+                 + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
     a.click();
     URL.revokeObjectURL(url);
 
@@ -851,6 +923,15 @@ async function exportXlsx() {
 
 $('tableName').textContent = TABLE_ID;
 $('exportBtn').onclick = exportXlsx;
+
+/* En mode compact, l'inspecteur reste accessible via "Détails" : utile
+   pour vérifier tri, filtres et règles sans modifier l'URL du widget. */
+if (COMPACT) document.body.classList.add('compact');
+$('moreBtn').onclick = () => {
+  const open = document.body.classList.toggle('details-open');
+  $('moreBtn').textContent = open ? 'Masquer' : 'Détails';
+  if (S.data) render();
+};
 
 grist.ready({ requiredAccess: 'full' });
 
