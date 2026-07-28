@@ -158,6 +158,8 @@
 
   .viewinfo { display: flex; flex-wrap: wrap; gap: 8px; }
   .empty { color: var(--muted); font-style: italic; }
+  .ko { color: var(--alert); font-weight: 500; }
+  .ok { color: #1d6a3c; }
 
   @media (max-width: 620px) { .col, .rule { grid-template-columns: 1fr; } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -327,16 +329,30 @@ function resolveField(f) {
   const fldOpts = parseJson(f.widgetOptions, {});
   const opts = { ...colOpts, ...fldOpts };
 
-  const ruleRefs   = refList(f.rules).length ? refList(f.rules) : refList(col.rules);
-  const ruleStyles = fldOpts.rulesOptions || colOpts.rulesOptions || [];
+  /* Règles conditionnelles. Piège : les références aux règles et leurs
+     styles doivent provenir du MÊME niveau. Un rulesOptions vide au
+     niveau du champ vaut [], qui est "truthy" en JavaScript, et écrasait
+     silencieusement les styles définis sur la colonne. */
+  const fRefs  = refList(f.rules);
+  const cRefs  = refList(col.rules);
+  const fStyle = Array.isArray(fldOpts.rulesOptions) && fldOpts.rulesOptions.length ? fldOpts.rulesOptions : null;
+  const cStyle = Array.isArray(colOpts.rulesOptions) && colOpts.rulesOptions.length ? colOpts.rulesOptions : null;
+
+  let ruleRefs = [], ruleStyles = [], ruleOrigin = null;
+  if (fRefs.length && fStyle)      { ruleRefs = fRefs; ruleStyles = fStyle;      ruleOrigin = 'champ'; }
+  else if (cRefs.length && cStyle) { ruleRefs = cRefs; ruleStyles = cStyle;      ruleOrigin = 'colonne'; }
+  else if (fRefs.length)           { ruleRefs = fRefs; ruleStyles = cStyle || []; ruleOrigin = 'champ, styles repris de la colonne'; }
+  else if (cRefs.length)           { ruleRefs = cRefs; ruleStyles = fStyle || []; ruleOrigin = 'colonne, styles repris du champ'; }
 
   const rules = ruleRefs.map((ref, i) => {
     const rc = S.colsByRef[ref];
+    const colId = rc ? rc.colId : null;   // ex. gristHelper_ConditionalRule2
+    const style = ruleStyles[i] || {};
     return {
-      ref,
-      colId: rc ? rc.colId : null,        // ex. gristHelper_ConditionalRule2
-      formula: rc ? rc.formula : '(introuvable)',
-      style: ruleStyles[i] || {},
+      ref, colId, style,
+      formula: rc ? rc.formula : '(colonne technique introuvable)',
+      hasData:  !!(colId && S.data[colId]),          // le booléen par ligne est-il lisible ?
+      hasStyle: Object.keys(style).length > 0,       // un style est-il associé ?
     };
   });
 
@@ -356,7 +372,7 @@ function resolveField(f) {
     displayColId: displayCol ? displayCol.colId : null,
     isFormula: !!col.isFormula && !!col.formula,
     width: f.width || 100,
-    opts, rules,
+    opts, rules, ruleOrigin,
   };
 }
 
@@ -585,16 +601,33 @@ function render() {
   /* --- règles conditionnelles --- */
   const withRules = fields.filter(f => f.rules.length);
   $('rules').innerHTML = withRules.length
-    ? withRules.map(f => f.rules.map(r => {
-        const flags = r.colId ? S.data[r.colId] : null;
+    ? withRules.map(f => f.rules.map((r, n) => {
+        const flags = r.hasData ? S.data[r.colId] : null;
         const hits = flags ? rows.filter(i => flags[i]).length : 0;
+
+        /* Deux pannes possibles, on les nomme séparément : le booléen
+           par ligne est illisible, ou le style associé est vide. */
+        const diag = [];
+        if (!r.hasData)  diag.push('<span class="ko">le booléen par ligne n\'est pas lisible dans les données</span>');
+        else if (!hits)  diag.push('<span class="ko">aucune ligne ne déclenche cette règle</span>');
+        else             diag.push('<span class="ok">' + hits + ' ligne(s) déclenchée(s)</span>');
+        if (!r.hasStyle) diag.push('<span class="ko">aucun style associé — rien à appliquer dans Excel</span>');
+
         return '<div class="rule">' +
-          '<div class="preview" style="' + previewCss(r.style) + '">' + escapeHtml(f.label) + '</div>' +
-          '<div><code>' + escapeHtml(r.formula || '(vide)') + '</code>' +
-          '<div class="on">colonne technique <strong>' + escapeHtml(r.colId || '?') + '</strong> — ' +
-          hits + ' ligne(s) déclenchée(s)</div></div></div>';
+          '<div class="preview" style="' + previewCss(r.style) + '">' +
+            (r.hasStyle ? escapeHtml(f.label) : '<span class="empty">sans style</span>') + '</div>' +
+          '<div>' +
+            '<div class="label">' + escapeHtml(f.label) + ' — règle ' + (n + 1) +
+              ' <span class="tok">source : ' + escapeHtml(f.ruleOrigin || '?') + '</span></div>' +
+            '<code>' + escapeHtml(r.formula || '(vide)') + '</code>' +
+            '<div class="on">colonne technique <strong>' + escapeHtml(r.colId || '?') + '</strong></div>' +
+            '<div class="on">' + diag.join(' · ') + '</div>' +
+            '<details><summary>style de la règle</summary><pre>' +
+              escapeHtml(JSON.stringify(r.style, null, 2)) + '</pre></details>' +
+          '</div></div>';
       }).join('')).join('')
-    : '<p class="empty">Aucune règle conditionnelle sur cette vue.</p>';
+    : '<p class="empty">Aucune règle conditionnelle détectée sur cette vue. Si Grist en affiche, ' +
+      'c\'est que les références de règles ne remontent ni sur le champ ni sur la colonne.</p>';
   $('rulesSection').hidden = false;
 
   setStatus('<strong>' + rows.length + '</strong> ligne(s) et <strong>' + fields.length +
