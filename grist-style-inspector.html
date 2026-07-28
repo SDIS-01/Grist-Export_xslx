@@ -1,0 +1,807 @@
+<!--
+  Inspecteur de mise en forme Grist + export .xlsx fidèle
+  -------------------------------------------------------
+  Widget custom en LECTURE SEULE. Il lit les tables système de Grist,
+  résout la mise en forme réelle de chaque colonne, et rejoue le tout
+  dans un fichier Excel : mêmes lignes, même ordre, mêmes libellés,
+  mêmes couleurs.
+
+  Ne modifie AUCUNE donnée du document.
+
+  Installation :
+    1. Héberger ce fichier (serveur web joignable depuis le poste).
+    2. Dans Grist : Add Widget > Custom > URL de ce fichier.
+    3. Access level : "Full document access" (obligatoire : les tables
+       système _grist_* ne sont pas lisibles autrement).
+
+  Si Grist est auto-hébergé, remplacer l'URL de grist-plugin-api.js
+  ci-dessous par celle de l'instance (https://<serveur>/grist-plugin-api.js).
+-->
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inspecteur de mise en forme — MEC_2023</title>
+
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --paper:  #fbfbfc;
+    --ink:    #16191d;
+    --muted:  #626d7a;
+    --hair:   #e2e6ea;
+    --slab:   #f1f3f6;
+    --accent: #1f5673;
+    --signal: #8a5a00;
+    --alert:  #9b2226;
+    --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--sans); font-size: 13px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .bar {
+    display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap;
+    padding: 14px 18px; border-bottom: 1px solid var(--hair);
+    background: #fff; position: sticky; top: 0; z-index: 5;
+  }
+  .eyebrow {
+    display: block; font-family: var(--mono); font-size: 10px;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  }
+  .bar h1 {
+    margin: 1px 0 0; font-family: var(--mono); font-size: 17px;
+    font-weight: 600; letter-spacing: -.01em;
+  }
+  .field { display: flex; flex-direction: column; gap: 3px; }
+  .field span { font-size: 11px; color: var(--muted); }
+  select {
+    font: inherit; font-size: 12px; padding: 5px 8px;
+    border: 1px solid var(--hair); border-radius: 3px;
+    background: #fff; color: var(--ink); max-width: 250px;
+  }
+  .check {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--ink); padding-bottom: 6px;
+  }
+  button {
+    font: inherit; font-size: 12px; font-weight: 500; padding: 7px 14px;
+    border: 1px solid var(--accent); border-radius: 3px;
+    background: var(--accent); color: #fff; cursor: pointer; margin-left: auto;
+  }
+  button:hover:not(:disabled) { background: #17435a; }
+  button:disabled { opacity: .45; cursor: default; }
+  :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+  .status {
+    padding: 10px 18px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--hair);
+  }
+  .status.error { color: var(--alert); background: #fdf4f4; }
+  .status strong { color: var(--ink); font-weight: 500; }
+
+  section { padding: 18px; border-bottom: 1px solid var(--hair); }
+  h2 {
+    margin: 0 0 12px; font-family: var(--mono); font-size: 11px;
+    font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .col {
+    display: grid;
+    grid-template-columns: 148px minmax(120px, 1fr) minmax(180px, 1.4fr);
+    gap: 14px; align-items: start;
+    padding: 11px 0; border-top: 1px solid var(--hair);
+  }
+  .col:first-of-type { border-top: none; }
+
+  .preview {
+    min-height: 26px; padding: 4px 7px;
+    border: 1px solid var(--hair); border-radius: 2px; background: #fff;
+    font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .cid { font-family: var(--mono); font-size: 12px; font-weight: 500; }
+  .label { color: var(--muted); font-size: 11.5px; }
+  .type {
+    display: inline-block; margin-top: 3px; font-family: var(--mono);
+    font-size: 10px; padding: 1px 5px; border: 1px solid var(--hair);
+    border-radius: 2px; color: var(--muted);
+  }
+
+  .tokens { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tok {
+    font-family: var(--mono); font-size: 10.5px; padding: 2px 6px;
+    background: var(--slab); border-radius: 2px; color: #3a4550;
+  }
+  .tok.none { color: var(--muted); font-style: italic; background: transparent; }
+  .swatch {
+    display: inline-block; width: 8px; height: 8px; margin-right: 4px;
+    border: 1px solid rgba(0,0,0,.18); vertical-align: -1px;
+  }
+
+  .badge {
+    display: inline-block; margin-top: 5px; font-family: var(--mono);
+    font-size: 10px; font-weight: 500; padding: 2px 6px; border-radius: 2px;
+    background: #fdf6e8; color: var(--signal); border: 1px solid #ecdcb8;
+  }
+  .badge.link { background: #eef4f7; color: var(--accent); border-color: #cddde5; }
+
+  details { margin-top: 6px; }
+  summary { cursor: pointer; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+  pre {
+    margin: 6px 0 0; padding: 8px 10px; background: var(--slab); border-radius: 3px;
+    font-family: var(--mono); font-size: 11px; line-height: 1.5;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  }
+
+  .rule {
+    display: grid; grid-template-columns: 148px 1fr; gap: 14px;
+    padding: 10px 0; border-top: 1px solid var(--hair);
+  }
+  .rule:first-of-type { border-top: none; }
+  .rule code {
+    font-family: var(--mono); font-size: 11.5px; background: var(--slab);
+    padding: 2px 5px; border-radius: 2px; display: inline-block;
+  }
+  .rule .on { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  .viewinfo { display: flex; flex-wrap: wrap; gap: 8px; }
+  .empty { color: var(--muted); font-style: italic; }
+
+  @media (max-width: 620px) { .col, .rule { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div>
+    <span class="eyebrow">Table</span>
+    <h1 id="tableName">MEC_2023</h1>
+  </div>
+  <label class="field">
+    <span>Vue lue</span>
+    <select id="sectionPicker"></select>
+  </label>
+  <label class="check">
+    <input type="checkbox" id="fidelity" checked>
+    Reprendre le tri et les filtres de la vue
+  </label>
+  <button id="exportBtn" disabled>Exporter en .xlsx</button>
+</div>
+
+<div class="status" id="status">Connexion au document…</div>
+
+<section id="viewSection" hidden>
+  <h2>Restitution de la vue</h2>
+  <div class="viewinfo" id="viewinfo"></div>
+</section>
+
+<section id="colsSection" hidden>
+  <h2>Colonnes et styles résolus</h2>
+  <div id="cols"></div>
+</section>
+
+<section id="rulesSection" hidden>
+  <h2>Règles conditionnelles</h2>
+  <div id="rules"></div>
+</section>
+
+<script>
+/* =========================================================================
+   1. CONFIGURATION ET ÉTAT
+   ========================================================================= */
+
+const TABLE_ID = 'MEC_2023';   // <- table à inspecter
+
+const S = {
+  tableRef: null,
+  colsByRef: {},     // rowId _grist_Tables_column -> colonne
+  colsById:  {},     // colId                      -> colonne
+  sections:  [],
+  filters:   [],     // lignes de _grist_Filters
+  data:      null,   // fetchTable(TABLE_ID), orienté colonnes
+  rowCount:  0,
+};
+
+const $ = id => document.getElementById(id);
+
+function setStatus(html, isError) {
+  const el = $('status');
+  el.innerHTML = html;
+  el.classList.toggle('error', !!isError);
+}
+
+/* Grist renvoie les tables orientées colonnes : {id:[...], colA:[...]}. */
+function toRows(t) {
+  return t.id.map((id, i) => {
+    const o = { id };
+    for (const k in t) if (k !== 'id') o[k] = t[k][i];
+    return o;
+  });
+}
+
+function parseJson(raw, fallback) {
+  if (!raw) return fallback;
+  try { const v = JSON.parse(raw); return v == null ? fallback : v; }
+  catch (e) { return fallback; }
+}
+
+/* Une liste Grist arrive sous la forme ['L', 12, 34]. */
+function refList(v) {
+  return Array.isArray(v) && v[0] === 'L' ? v.slice(1) : [];
+}
+
+/* Une erreur de formule arrive sous la forme ['E', 'ValueError', ...]. */
+function isError(v) { return Array.isArray(v) && v[0] === 'E'; }
+
+/* Normalise les vides pour les comparaisons de filtres. */
+function blankish(v) { return v === null || v === undefined || v === '' || v === 0 && false; }
+
+
+/* =========================================================================
+   2. LECTURE DES MÉTADONNÉES
+   ========================================================================= */
+
+async function load() {
+  const [tables, cols, sections, fields] = await Promise.all([
+    grist.docApi.fetchTable('_grist_Tables'),
+    grist.docApi.fetchTable('_grist_Tables_column'),
+    grist.docApi.fetchTable('_grist_Views_section'),
+    grist.docApi.fetchTable('_grist_Views_section_field'),
+  ]);
+
+  const table = toRows(tables).find(t => t.tableId === TABLE_ID);
+  if (!table) throw new Error('Table "' + TABLE_ID + '" introuvable dans ce document.');
+  S.tableRef = table.id;
+
+  S.colsByRef = {}; S.colsById = {};
+  toRows(cols).forEach(c => {
+    if (c.parentId === S.tableRef) S.colsById[c.colId] = c;
+    S.colsByRef[c.id] = c;
+  });
+
+  /* Les filtres vivent dans _grist_Filters depuis Grist 1.x ; sur les
+     versions plus anciennes ils sont portés par le champ lui-même. */
+  try {
+    S.filters = toRows(await grist.docApi.fetchTable('_grist_Filters'));
+  } catch (e) {
+    S.filters = [];
+  }
+
+  const allFields = toRows(fields);
+  S.sections = toRows(sections)
+    .filter(s => s.tableRef === S.tableRef)
+    .map(s => ({ ...s, allFields: allFields.filter(f => f.parentId === s.id) }))
+    .filter(s => s.allFields.length);
+
+  if (!S.sections.length) throw new Error('Aucune vue ne présente ' + TABLE_ID + '.');
+
+  /* Les données réelles. Elles contiennent aussi les colonnes cachées :
+       - gristHelper_ConditionalRule*  -> booléen de chaque règle, par ligne
+       - gristHelper_Display*          -> libellé affiché des références
+       - manualSort                    -> ordre manuel par défaut */
+  S.data = await grist.docApi.fetchTable(TABLE_ID);
+  S.rowCount = S.data.id.length;
+
+  const picker = $('sectionPicker');
+  picker.innerHTML = '';
+  S.sections.forEach((s, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = (s.title || 'Sans titre') + ' — ' + (s.parentKey || 'record') + ' #' + s.id;
+    picker.appendChild(o);
+  });
+  picker.onchange = render;
+  $('fidelity').onchange = render;
+
+  $('exportBtn').disabled = false;
+  render();
+}
+
+function currentSection() { return S.sections[+$('sectionPicker').value]; }
+
+
+/* =========================================================================
+   3. RÉSOLUTION DU STYLE ET DES LIBELLÉS
+   ========================================================================= */
+
+/* Le style vient de deux niveaux : la colonne (défaut) puis le champ
+   (surcharge dans cette vue). Grist privilégie le champ. */
+function resolveField(f) {
+  const col = S.colsByRef[f.colRef];
+  if (!col) return null;
+
+  const colOpts = parseJson(col.widgetOptions, {});
+  const fldOpts = parseJson(f.widgetOptions, {});
+  const opts = { ...colOpts, ...fldOpts };
+
+  const ruleRefs   = refList(f.rules).length ? refList(f.rules) : refList(col.rules);
+  const ruleStyles = fldOpts.rulesOptions || colOpts.rulesOptions || [];
+
+  const rules = ruleRefs.map((ref, i) => {
+    const rc = S.colsByRef[ref];
+    return {
+      ref,
+      colId: rc ? rc.colId : null,        // ex. gristHelper_ConditionalRule2
+      formula: rc ? rc.formula : '(introuvable)',
+      style: ruleStyles[i] || {},
+    };
+  });
+
+  /* Colonne d'affichage des références : Grist crée une colonne formule
+     cachée qui contient déjà le libellé visible. On la lit directement,
+     plutôt que de résoudre la table cible nous-mêmes. */
+  const displayRef = f.displayCol || col.displayCol || 0;
+  const displayCol = displayRef ? S.colsByRef[displayRef] : null;
+
+  return {
+    field: f, col,
+    colRef: col.id,
+    colId: col.colId,
+    label: col.label || col.colId,
+    type: col.type,
+    baseType: String(col.type).split(':')[0],
+    displayColId: displayCol ? displayCol.colId : null,
+    isFormula: !!col.isFormula && !!col.formula,
+    width: f.width || 100,
+    opts, rules,
+  };
+}
+
+function currentFields() {
+  return currentSection().allFields
+    .slice()
+    .sort((a, b) => a.parentPos - b.parentPos)
+    .map(resolveField)
+    .filter(Boolean);
+}
+
+/* Valeur telle que Grist l'affiche : libellé de référence si disponible,
+   sinon valeur brute. */
+function displayedValue(f, rowIdx) {
+  if (f.displayColId && S.data[f.displayColId]) {
+    return S.data[f.displayColId][rowIdx];
+  }
+  const arr = S.data[f.colId];
+  return arr ? arr[rowIdx] : null;
+}
+
+/* Version texte, pour l'aperçu HTML et pour le tri. */
+function asText(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (isError(v)) return '#ERREUR';
+  if (Array.isArray(v) && v[0] === 'L') return refList(v).join(', ');
+  if (typeof v === 'boolean') return v ? 'vrai' : 'faux';
+  return String(v);
+}
+
+
+/* =========================================================================
+   4. TRI ET FILTRES DE LA VUE
+   ========================================================================= */
+
+/* sortColRefs se présente soit comme [3, -7] (signe = sens), soit comme
+   [{colRef: 3, direction: -1}]. On accepte les deux. */
+function parseSort(raw) {
+  const spec = parseJson(raw, []);
+  if (!Array.isArray(spec)) return [];
+  return spec.map(s => {
+    if (typeof s === 'number') return { colRef: Math.abs(s), dir: s < 0 ? -1 : 1 };
+    const dir = s.direction != null ? s.direction : (s.colRef < 0 ? -1 : 1);
+    return { colRef: Math.abs(s.colRef), dir: dir < 0 ? -1 : 1 };
+  }).filter(s => S.colsByRef[s.colRef]);
+}
+
+/* Valeur d'une colonne quelconque (pas forcément affichée) pour le tri. */
+function sortValue(colRef, rowIdx) {
+  const col = S.colsByRef[colRef];
+  if (!col) return null;
+  const disp = col.displayCol ? S.colsByRef[col.displayCol] : null;
+  const src = disp && S.data[disp.colId] ? disp.colId : col.colId;
+  const arr = S.data[src];
+  return arr ? arr[rowIdx] : null;
+}
+
+function compare(a, b) {
+  const ea = a === null || a === undefined || a === '';
+  const eb = b === null || b === undefined || b === '';
+  if (ea && eb) return 0;
+  if (ea) return -1;            // Grist place les vides en tête en ordre croissant
+  if (eb) return 1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), 'fr', { numeric: true, sensitivity: 'base' });
+}
+
+/* Filtres : {included:[...]}, {excluded:[...]} ou {min, max}. */
+function filterSpecsFor(section) {
+  const out = [];
+  S.filters
+    .filter(fl => fl.viewSectionRef === section.id && fl.filter)
+    .forEach(fl => out.push({ colRef: fl.colRef, spec: parseJson(fl.filter, null) }));
+  /* Repli sur le stockage historique, porté par le champ. */
+  section.allFields.forEach(f => {
+    if (f.filter && !out.some(o => o.colRef === f.colRef)) {
+      out.push({ colRef: f.colRef, spec: parseJson(f.filter, null) });
+    }
+  });
+  return out.filter(o => o.spec);
+}
+
+function passes(spec, value) {
+  if (!spec) return true;
+
+  if (spec.min != null || spec.max != null) {
+    if (typeof value !== 'number') return false;
+    if (spec.min != null && value < spec.min) return false;
+    if (spec.max != null && value > spec.max) return false;
+    return true;
+  }
+
+  const vals = Array.isArray(value) && value[0] === 'L'
+    ? refList(value)
+    : [value === undefined ? null : value];
+  const norm = vals.map(v => (v === '' ? null : v));
+  if (!norm.length) norm.push(null);
+
+  if (Array.isArray(spec.included) && spec.included.length) {
+    const set = new Set(spec.included.map(v => (v === '' ? null : v)));
+    return norm.some(v => set.has(v));
+  }
+  if (Array.isArray(spec.excluded) && spec.excluded.length) {
+    const set = new Set(spec.excluded.map(v => (v === '' ? null : v)));
+    return !norm.some(v => set.has(v));
+  }
+  return true;
+}
+
+/* Indices des lignes à exporter, dans l'ordre affiché. */
+function orderedRowIndexes() {
+  const section = currentSection();
+  const fidelity = $('fidelity').checked;
+  let idx = S.data.id.map((_, i) => i);
+
+  if (fidelity) {
+    const specs = filterSpecsFor(section);
+    if (specs.length) {
+      idx = idx.filter(i => specs.every(s => {
+        const col = S.colsByRef[s.colRef];
+        return !col || passes(s.spec, S.data[col.colId] ? S.data[col.colId][i] : null);
+      }));
+    }
+  }
+
+  const sort = fidelity ? parseSort(section.sortColRefs) : [];
+  if (sort.length) {
+    idx.sort((ia, ib) => {
+      for (const s of sort) {
+        const c = compare(sortValue(s.colRef, ia), sortValue(s.colRef, ib)) * s.dir;
+        if (c) return c;
+      }
+      return 0;
+    });
+  } else if (S.data.manualSort) {
+    /* Ordre par défaut d'une table Grist : la colonne manualSort. */
+    idx.sort((ia, ib) => S.data.manualSort[ia] - S.data.manualSort[ib]);
+  }
+  return idx;
+}
+
+
+/* =========================================================================
+   5. AFFICHAGE
+   ========================================================================= */
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+}
+
+function styleTokens(o) {
+  const t = [];
+  if (o.fillColor) t.push('<span class="tok"><span class="swatch" style="background:' + o.fillColor + '"></span>fill ' + o.fillColor + '</span>');
+  if (o.textColor) t.push('<span class="tok"><span class="swatch" style="background:' + o.textColor + '"></span>text ' + o.textColor + '</span>');
+  if (o.fontBold)          t.push('<span class="tok">bold</span>');
+  if (o.fontItalic)        t.push('<span class="tok">italic</span>');
+  if (o.fontUnderline)     t.push('<span class="tok">underline</span>');
+  if (o.fontStrikethrough) t.push('<span class="tok">strike</span>');
+  if (o.alignment)         t.push('<span class="tok">align ' + o.alignment + '</span>');
+  if (o.wrap)              t.push('<span class="tok">wrap</span>');
+  if (o.numMode)           t.push('<span class="tok">' + o.numMode + '</span>');
+  if (o.decimals != null)  t.push('<span class="tok">decimals ' + o.decimals + '</span>');
+  if (o.dateFormat)        t.push('<span class="tok">' + o.dateFormat + '</span>');
+  if (o.choices)           t.push('<span class="tok">' + o.choices.length + ' choix</span>');
+  if (!t.length) t.push('<span class="tok none">style par défaut</span>');
+  return t.join('');
+}
+
+function previewCss(o) {
+  const css = [];
+  if (o.fillColor) css.push('background:' + o.fillColor);
+  if (o.textColor) css.push('color:' + o.textColor);
+  if (o.fontBold) css.push('font-weight:600');
+  if (o.fontItalic) css.push('font-style:italic');
+  const deco = [];
+  if (o.fontUnderline) deco.push('underline');
+  if (o.fontStrikethrough) deco.push('line-through');
+  if (deco.length) css.push('text-decoration:' + deco.join(' '));
+  if (o.alignment) css.push('text-align:' + o.alignment);
+  return css.join(';');
+}
+
+function render() {
+  const section = currentSection();
+  const fields = currentFields();
+  const rows = orderedRowIndexes();
+  const sort = parseSort(section.sortColRefs);
+  const specs = filterSpecsFor(section);
+
+  /* --- restitution de la vue --- */
+  const info = [];
+  info.push('<span class="tok">' + rows.length + ' / ' + S.rowCount + ' ligne(s)</span>');
+  info.push(sort.length
+    ? '<span class="tok">tri : ' + sort.map(s => (S.colsByRef[s.colRef].label || S.colsByRef[s.colRef].colId) + (s.dir < 0 ? ' ↓' : ' ↑')).join(', ') + '</span>'
+    : '<span class="tok none">tri : ordre manuel</span>');
+  info.push(specs.length
+    ? '<span class="tok">' + specs.length + ' filtre(s) actif(s)</span>'
+    : '<span class="tok none">aucun filtre</span>');
+  if (section.numFrozen) info.push('<span class="tok">' + section.numFrozen + ' colonne(s) figée(s)</span>');
+  $('viewinfo').innerHTML = info.join('');
+  $('viewSection').hidden = false;
+
+  const first = rows.length ? rows[0] : null;
+
+  /* --- colonnes --- */
+  $('cols').innerHTML = fields.map(f => {
+    const sample = first !== null ? asText(displayedValue(f, first)) : '—';
+    return '<div class="col">' +
+      '<div class="preview" style="' + previewCss(f.opts) + '">' + escapeHtml(sample || '—') + '</div>' +
+      '<div>' +
+        '<div class="cid">' + escapeHtml(f.colId) + '</div>' +
+        '<div class="label">' + escapeHtml(f.label) + '</div>' +
+        '<span class="type">' + escapeHtml(f.type) + (f.isFormula ? ' · formule' : '') + '</span>' +
+        (f.displayColId ? '<div><span class="badge link">libellé via ' + escapeHtml(f.displayColId) + '</span></div>' : '') +
+        (f.rules.length ? '<div><span class="badge">' + f.rules.length + ' règle(s)</span></div>' : '') +
+      '</div>' +
+      '<div>' +
+        '<div class="tokens">' + styleTokens(f.opts) + '</div>' +
+        '<details><summary>widgetOptions brut</summary><pre>' +
+          escapeHtml(JSON.stringify(f.opts, null, 2)) + '</pre></details>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  $('colsSection').hidden = false;
+
+  /* --- règles conditionnelles --- */
+  const withRules = fields.filter(f => f.rules.length);
+  $('rules').innerHTML = withRules.length
+    ? withRules.map(f => f.rules.map(r => {
+        const flags = r.colId ? S.data[r.colId] : null;
+        const hits = flags ? rows.filter(i => flags[i]).length : 0;
+        return '<div class="rule">' +
+          '<div class="preview" style="' + previewCss(r.style) + '">' + escapeHtml(f.label) + '</div>' +
+          '<div><code>' + escapeHtml(r.formula || '(vide)') + '</code>' +
+          '<div class="on">colonne technique <strong>' + escapeHtml(r.colId || '?') + '</strong> — ' +
+          hits + ' ligne(s) déclenchée(s)</div></div></div>';
+      }).join('')).join('')
+    : '<p class="empty">Aucune règle conditionnelle sur cette vue.</p>';
+  $('rulesSection').hidden = false;
+
+  setStatus('<strong>' + rows.length + '</strong> ligne(s) et <strong>' + fields.length +
+            '</strong> colonne(s) seront exportées, dans l\'ordre affiché par la vue.');
+}
+
+
+/* =========================================================================
+   6. EXPORT EXCEL
+   ========================================================================= */
+
+/* Grist "#RRGGBB" -> ExcelJS "FFRRGGBB" */
+function argb(hex) {
+  if (!hex) return null;
+  const h = String(hex).replace('#', '');
+  return (h.length === 8 ? h : 'FF' + h).toUpperCase();
+}
+
+/* Tokens moment (Grist) -> tokens de format Excel. */
+function dateNumFmt(fmt, timeFmt) {
+  if (!fmt) return 'dd/mm/yyyy';
+  let out = fmt.replace(/Y/g, 'y').replace(/D/g, 'd').replace(/M/g, 'm');
+  if (timeFmt) out += ' ' + timeFmt.replace(/H/g, 'h').replace(/A/g, 'AM/PM');
+  return out;
+}
+
+function numberNumFmt(o) {
+  const dec = o.decimals != null ? o.decimals
+            : (o.maxDecimals != null ? o.maxDecimals
+            : (o.numMode === 'currency' ? 2 : null));
+  const frac = dec ? '.' + '0'.repeat(dec) : '';
+  switch (o.numMode) {
+    case 'percent':    return '0' + (dec ? '.' + '0'.repeat(dec) : '') + '%';
+    case 'currency':   return '#,##0' + (frac || '.00') + ' "' + (o.currency === 'USD' ? '$' : '€') + '"';
+    case 'scientific': return '0.00E+00';
+    case 'decimal':    return '#,##0' + frac;
+    default:           return dec ? '#,##0' + frac : 'General';
+  }
+}
+
+function applyStyle(cell, o) {
+  const fill = argb(o.fillColor);
+  if (fill && fill !== 'FFFFFFFF') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
+  }
+  const font = {};
+  if (o.textColor) font.color = { argb: argb(o.textColor) };
+  if (o.fontBold) font.bold = true;
+  if (o.fontItalic) font.italic = true;
+  if (o.fontUnderline) font.underline = true;
+  if (o.fontStrikethrough) font.strike = true;
+  if (Object.keys(font).length) cell.font = { ...(cell.font || {}), ...font };
+
+  const al = {};
+  if (o.alignment) al.horizontal = o.alignment;
+  if (o.wrap) al.wrapText = true;
+  if (Object.keys(al).length) cell.alignment = { ...(cell.alignment || {}), ...al };
+}
+
+/* Valeur Grist -> valeur Excel, en respectant le type de colonne. */
+function cellValue(f, rowIdx) {
+  const raw = displayedValue(f, rowIdx);
+  if (raw === null || raw === undefined || raw === '') return null;
+  if (isError(raw)) return '#ERREUR';
+
+  /* Si la valeur passe par une colonne d'affichage, c'est déjà du texte. */
+  if (f.displayColId) {
+    return Array.isArray(raw) && raw[0] === 'L' ? refList(raw).join(', ') : raw;
+  }
+
+  switch (f.baseType) {
+    case 'Date':
+    case 'DateTime':
+      return typeof raw === 'number' ? new Date(raw * 1000) : raw;   // secondes epoch
+    case 'Bool':
+      return !!raw;
+    case 'ChoiceList':
+    case 'RefList':
+      return refList(raw).join(', ');
+    default:
+      return raw;
+  }
+}
+
+/* Une ChoiceList colorée : chaque jeton garde sa couleur de texte via
+   le texte enrichi d'Excel (le fond, lui, ne peut pas varier dans une
+   même cellule). */
+function richChoiceList(raw, choiceOptions, baseColor) {
+  const parts = [];
+  refList(raw).forEach((v, i) => {
+    if (i) parts.push({ text: ', ', font: { color: { argb: argb(baseColor) || 'FF000000' } } });
+    const co = choiceOptions[v] || {};
+    const font = { color: { argb: argb(co.textColor) || argb(baseColor) || 'FF000000' } };
+    if (co.fontBold) font.bold = true;
+    if (co.fontItalic) font.italic = true;
+    parts.push({ text: String(v), font });
+  });
+  return parts.length ? { richText: parts } : null;
+}
+
+async function exportXlsx() {
+  const btn = $('exportBtn');
+  btn.disabled = true;
+  setStatus('Génération du fichier…');
+
+  try {
+    const section = currentSection();
+    const fields = currentFields();
+    const rows = orderedRowIndexes();
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Widget Grist';
+    const ws = wb.addWorksheet((section.title || TABLE_ID).slice(0, 31).replace(/[\\\/\*\?\[\]:]/g, '-'));
+
+    /* En-tête : Grist n'expose pas de style d'en-tête paramétrable, on en
+       pose un neutre et lisible. */
+    const header = ws.addRow(fields.map(f => f.label));
+    header.eachCell(c => {
+      c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F5673' } };
+      c.alignment = { vertical: 'middle' };
+      c.border = { bottom: { style: 'thin', color: { argb: 'FFB8C2CC' } } };
+    });
+    header.height = 20;
+
+    /* Volets figés : la ligne d'en-tête, plus les colonnes figées de la vue. */
+    ws.views = [{ state: 'frozen', ySplit: 1, xSplit: section.numFrozen || 0 }];
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: fields.length } };
+
+    /* Largeurs : Grist stocke une largeur en pixels sur le champ. */
+    fields.forEach((f, i) => {
+      ws.getColumn(i + 1).width = Math.max(9, Math.round(f.width / 7));
+    });
+
+    /* Lignes de données, dans l'ordre affiché par la vue. */
+    rows.forEach(r => {
+      const row = ws.addRow(fields.map(f => cellValue(f, r)));
+
+      fields.forEach((f, i) => {
+        const cell = row.getCell(i + 1);
+
+        /* a) style de base de la colonne */
+        applyStyle(cell, f.opts);
+
+        /* b) couleurs des valeurs Choice / ChoiceList */
+        const co = f.opts.choiceOptions;
+        if (co) {
+          if (f.baseType === 'Choice' && typeof cell.value === 'string' && co[cell.value]) {
+            applyStyle(cell, co[cell.value]);
+          } else if (f.baseType === 'ChoiceList') {
+            const rich = richChoiceList(S.data[f.colId][r], co, f.opts.textColor);
+            if (rich) cell.value = rich;
+          }
+        }
+
+        /* c) règle conditionnelle : la première règle vraie l'emporte,
+              comme dans l'affichage Grist. */
+        for (const rule of f.rules) {
+          const flags = rule.colId ? S.data[rule.colId] : null;
+          if (flags && flags[r]) { applyStyle(cell, rule.style); break; }
+        }
+
+        /* d) format de nombre / de date */
+        if (!f.displayColId) {
+          if (f.baseType === 'Date' || f.baseType === 'DateTime') {
+            cell.numFmt = dateNumFmt(f.opts.dateFormat, f.opts.timeFormat);
+          } else if (f.baseType === 'Numeric' || f.baseType === 'Int') {
+            cell.numFmt = numberNumFmt(f.opts);
+          }
+        }
+      });
+    });
+
+    const buf = await wb.xlsx.writeBuffer();
+    const url = URL.createObjectURL(new Blob([buf], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = TABLE_ID + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
+    a.click();
+    URL.revokeObjectURL(url);
+
+    setStatus('Fichier généré : <strong>' + rows.length + '</strong> ligne(s), <strong>' +
+              fields.length + '</strong> colonne(s).');
+  } catch (e) {
+    setStatus('Échec de la génération : ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+
+/* =========================================================================
+   7. DÉMARRAGE
+   ========================================================================= */
+
+$('tableName').textContent = TABLE_ID;
+$('exportBtn').onclick = exportXlsx;
+
+grist.ready({ requiredAccess: 'full' });
+
+/* Rechargement à chaque changement de données, pour que l'aperçu et les
+   compteurs restent alignés sur ce qu'affiche Grist. */
+grist.onRecords(() => { load().catch(e => setStatus(e.message, true)); });
+
+load().catch(e => setStatus(e.message, true));
+</script>
+</body>
+</html>
