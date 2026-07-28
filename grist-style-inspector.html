@@ -40,6 +40,9 @@
     --accent: #1f5673;
     --signal: #8a5a00;
     --alert:  #9b2226;
+    /* Couleur du bouton d'export. Pour l'orange : #e8590c / #c2410c. */
+    --action:       #12894b;
+    --action-hover: #0d6e3b;
     --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
   }
@@ -81,6 +84,23 @@
   }
   button:hover:not(:disabled) { background: #17435a; }
   button:disabled { opacity: .45; cursor: default; }
+
+  /* Bouton d'export : c'est la seule action offerte à l'utilisateur
+     final, il doit se repérer d'un coup d'œil. */
+  #exportBtn {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 600; padding: 9px 18px;
+    border-radius: 4px;
+    background: var(--action); border-color: var(--action);
+    box-shadow: 0 1px 3px rgba(18, 137, 75, .35);
+  }
+  #exportBtn:hover:not(:disabled) {
+    background: var(--action-hover); border-color: var(--action-hover);
+  }
+  #exportBtn svg { width: 15px; height: 15px; flex: none; }
+
+  /* En mode bouton seul, il occupe toute l'attention : on l'agrandit. */
+  body.compact:not(.details-open) #exportBtn { font-size: 14px; padding: 11px 26px; }
   :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 
   .status {
@@ -213,7 +233,15 @@
     <input type="checkbox" id="compactToggle">
     N'afficher que le bouton
   </label>
-  <button id="exportBtn" disabled>Exporter en .xlsx</button>
+  <button id="exportBtn" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+    Exporter en .xlsx
+  </button>
   <button id="moreBtn" type="button">Détails</button>
 </div>
 
