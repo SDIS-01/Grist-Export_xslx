@@ -874,16 +874,35 @@ function toExcelDate(raw, type) {
   }
 }
 
+/* Toute valeur de liste — ChoiceList, RefList, colonne formule renvoyant
+   une liste, colonne d'affichage d'une référence multiple — arrive sous
+   la forme ['L', v1, v2]. Sans traitement, ExcelJS sérialise le tableau
+   tel quel : d'où les ["L"] dans les cellules vides et les guillemets
+   autour de chaque valeur.
+
+   On retire donc le marqueur 'L', on écarte les valeurs vides, et on
+   renvoie null quand il ne reste rien (cellule réellement vide). Les
+   valeurs restantes sont séparées par un retour à la ligne, dans
+   l'ordre donné par Grist : ni tri, ni dédoublonnage. */
+function listToLines(v) {
+  const items = (Array.isArray(v) && v[0] === 'L' ? v.slice(1) : v)
+    .map(x => asText(x).trim())
+    .filter(s => s !== '');
+  return items.length ? items.join('\n') : null;
+}
+
 /* Valeur Grist -> valeur Excel, en respectant le type de colonne. */
 function cellValue(f, rowIdx) {
   const raw = displayedValue(f, rowIdx);
   if (raw === null || raw === undefined || raw === '') return null;
   if (isError(raw)) return '#ERREUR';
 
+  /* Les listes sont traitées avant le type : une colonne formule (type
+     Any) peut elle aussi renvoyer une liste. */
+  if (Array.isArray(raw)) return listToLines(raw);
+
   /* Si la valeur passe par une colonne d'affichage, c'est déjà du texte. */
-  if (f.displayColId) {
-    return Array.isArray(raw) && raw[0] === 'L' ? refList(raw).join(', ') : raw;
-  }
+  if (f.displayColId) return raw;
 
   switch (f.baseType) {
     case 'Date':
@@ -891,9 +910,6 @@ function cellValue(f, rowIdx) {
       return toExcelDate(raw, f.type);
     case 'Bool':
       return !!raw;
-    case 'ChoiceList':
-    case 'RefList':
-      return refList(raw).join(', ');
     default:
       return raw;
   }
@@ -901,18 +917,30 @@ function cellValue(f, rowIdx) {
 
 /* Une ChoiceList colorée : chaque jeton garde sa couleur de texte via
    le texte enrichi d'Excel (le fond, lui, ne peut pas varier dans une
-   même cellule). */
+   même cellule). Un jeton par ligne, comme pour les autres listes. */
 function richChoiceList(raw, choiceOptions, baseColor) {
   const parts = [];
-  refList(raw).forEach((v, i) => {
-    if (i) parts.push({ text: ', ', font: { color: { argb: argb(baseColor) || 'FF000000' } } });
-    const co = choiceOptions[v] || {};
-    const font = { color: { argb: argb(co.textColor) || argb(baseColor) || 'FF000000' } };
-    if (co.fontBold) font.bold = true;
-    if (co.fontItalic) font.italic = true;
-    parts.push({ text: String(v), font });
-  });
+  refList(raw)
+    .filter(v => v !== null && v !== undefined && String(v).trim() !== '')
+    .forEach((v, i) => {
+      if (i) parts.push({ text: '\n', font: { color: { argb: argb(baseColor) || 'FF000000' } } });
+      const co = choiceOptions[v] || {};
+      const font = { color: { argb: argb(co.textColor) || argb(baseColor) || 'FF000000' } };
+      if (co.fontBold) font.bold = true;
+      if (co.fontItalic) font.italic = true;
+      parts.push({ text: String(v), font });
+    });
   return parts.length ? { richText: parts } : null;
+}
+
+/* La cellule contient-elle plusieurs valeurs empilées ? Excel n'affiche
+   un retour à la ligne que si le renvoi automatique est actif. */
+function hasLineBreak(v) {
+  if (typeof v === 'string') return v.indexOf('\n') >= 0;
+  if (v && Array.isArray(v.richText)) {
+    return v.richText.some(p => String(p.text).indexOf('\n') >= 0);
+  }
+  return false;
 }
 
 async function exportXlsx() {
@@ -966,7 +994,7 @@ async function exportXlsx() {
             applyStyle(cell, co[cell.value]);
           } else if (f.baseType === 'ChoiceList') {
             const rich = richChoiceList(S.data[f.colId][r], co, f.opts.textColor);
-            if (rich) cell.value = rich;
+            cell.value = rich;   // null si la liste est vide -> cellule vide
           }
         }
 
@@ -986,6 +1014,13 @@ async function exportXlsx() {
           } else if (f.baseType === 'Numeric' || f.baseType === 'Int') {
             cell.numFmt = numberNumFmt(f.opts);
           }
+        }
+
+        /* e) valeurs empilées : sans renvoi à la ligne, Excel afficherait
+              tout sur une seule ligne. La hauteur de ligne n'est pas
+              figée : Excel l'ajuste. */
+        if (hasLineBreak(cell.value)) {
+          cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'top' };
         }
       });
     });
