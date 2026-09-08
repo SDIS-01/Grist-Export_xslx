@@ -181,31 +181,32 @@
   .ko { color: var(--alert); font-weight: 500; }
   .ok { color: #1d6a3c; }
 
-  /* ---- mode compact : seul le bouton d'export est visible ---- */
-  #moreBtn {
-    margin-left: 8px; background: transparent; color: var(--muted);
-    border-color: var(--hair); font-size: 11px; padding: 6px 10px;
-  }
-  #moreBtn:hover { background: var(--slab); color: var(--ink); }
-  body:not(.compact) #moreBtn { display: none; }
+  /* ---- Les réglages de la barre (table, vue lue, cases à cocher) ne sont
+     visibles qu'après un clic sur « Ouvrir la configuration », dans le
+     panneau latéral droit de Grist. En dehors, la barre ne porte que le
+     bouton d'export. ---- */
+  body:not(.details-open) #ident,
+  body:not(.details-open) #pickerWrap,
+  body:not(.details-open) #compactWrap,
+  body:not(.details-open) #fidelityWrap { display: none; }
+  body:not(.details-open) #exportBtn { margin-left: 0; }
 
-  body.compact .bar { justify-content: center; padding: 12px 14px; border-bottom: none; }
-  body.compact #ident,
-  body.compact #pickerWrap,
-  body.compact #compactWrap,
-  body.compact #fidelityWrap { display: none; }
-  body.compact #exportBtn { margin-left: 0; }
+  /* ---- mode compact : seul le bouton d'export est visible ---- */
+  body.compact:not(.details-open) .bar {
+    justify-content: center; padding: 12px 14px; border-bottom: none;
+  }
   body.compact section { display: none; }
   body.compact .status {
     text-align: center; border-bottom: none; padding: 4px 14px 10px; font-size: 11px;
   }
 
-  /* Le bouton "Détails" rouvre l'inspecteur sans changer l'URL. */
+  /* « Ouvrir la configuration » (panneau de droite) rouvre l'inspecteur
+     ponctuellement, sans changer le réglage enregistré. */
+  body.details-open #ident,
+  body.details-open #pickerWrap,
+  body.details-open #compactWrap,
+  body.details-open #fidelityWrap { display: flex; }
   body.compact.details-open .bar { justify-content: flex-start; border-bottom: 1px solid var(--hair); }
-  body.compact.details-open #ident,
-  body.compact.details-open #pickerWrap,
-  body.compact.details-open #compactWrap,
-  body.compact.details-open #fidelityWrap { display: flex; }
   body.compact.details-open #exportBtn { margin-left: auto; }
   body.compact.details-open section { display: block; }
   body.compact.details-open .status { text-align: left; border-bottom: 1px solid var(--hair); }
@@ -242,7 +243,6 @@
     </svg>
     Exporter en .xlsx
   </button>
-  <button id="moreBtn" type="button">Détails</button>
 </div>
 
 <div class="status" id="status">Connexion au document…</div>
@@ -1052,13 +1052,13 @@ async function exportXlsx() {
 
 $('exportBtn').onclick = exportXlsx;
 
-/* Le bouton "Détails" rouvre l'inspecteur ponctuellement, sans modifier
-   le réglage enregistré : utile pour vérifier tri, filtres et règles. */
-$('moreBtn').onclick = () => {
-  const open = document.body.classList.toggle('details-open');
-  $('moreBtn').textContent = open ? 'Masquer' : 'Détails';
+/* L'inspecteur (réglages, tri, filtres, règles) n'est plus accessible depuis
+   la barre : il s'ouvre et se referme depuis « Ouvrir la configuration », dans
+   le panneau latéral droit de Grist. Le réglage enregistré n'est pas modifié. */
+function toggleDetails() {
+  document.body.classList.toggle('details-open');
   if (S.data) render();
-};
+}
 
 /* Répercute les réglages enregistrés sur l'interface. */
 function applyOptions() {
@@ -1100,7 +1100,9 @@ async function boot() {
   }
 }
 
-grist.ready({ requiredAccess: 'full' });
+/* onEditOptions fait apparaître « Ouvrir la configuration » dans le panneau
+   latéral droit (section Widget) : c'est le seul point d'entrée de l'inspecteur. */
+grist.ready({ requiredAccess: 'full', onEditOptions: toggleDetails });
 
 /* Réglages propres à CE widget, mémorisés par Grist dans le document. */
 if (grist.onOptions) {
